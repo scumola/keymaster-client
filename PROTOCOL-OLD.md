@@ -1,6 +1,6 @@
-# QIUI Cloud Protocol (Original)
+# QIUI Cloud Protocol (Original & Current)
 
-How the original QIUI cloud service authenticates users, identifies devices, and sends commands. This is the protocol that was compromised in the widely-reported 2020 breach that left users locked in their devices.
+How the original QIUI cloud service authenticates users, identifies devices, and sends commands — and what they did (and didn't) fix after the widely-reported 2020 breach that left users locked in their devices.
 
 ## Overview
 
@@ -273,3 +273,146 @@ This script could lock every QIUI device in existence. There was nothing to stop
 | Attacker locks devices | Send lock commands for every device found |
 | Users locked in | No way to unlock without BLE proximity + working cloud |
 | Cloud goes down | Physical lockout — users resort to screwdrivers and bolt cutters |
+
+---
+
+## How QIUI Tried to Fix It
+
+### Disclosure Timeline
+
+| Date | Event |
+|------|-------|
+| Apr 2020 | [Pen Test Partners](https://www.pentestpartners.com/security-blog/smart-male-chastity-lock-cock-up/) discovers vulnerabilities, contacts QIUI |
+| Apr–Sep 2020 | QIUI misses three self-imposed remediation deadlines, then stops responding |
+| Jun 2020 | QIUI quietly deploys API v2 to app stores — no communication to researchers |
+| Oct 6, 2020 | Pen Test Partners publishes full disclosure alongside multiple researchers |
+| Oct 2020 | QIUI issues emergency override, unlocking all devices via the cloud |
+| Late 2020 | [ChastityLock ransomware](https://www.bleepingcomputer.com/news/security/hacker-used-ransomware-to-lock-victims-in-their-iot-chastity-belt/) appears — attacker locks devices and demands 0.02 BTC (~$270) per victim |
+| 2021+ | QIUI develops app v3.0 with further security changes |
+
+### API v2 (June 2020) — The Botched Fix
+
+QIUI's first fix was to deploy a new version of the API that required authentication on most endpoints. But they made a critical mistake: **they left API v1 running alongside v2.**
+
+```
+                    ┌──────────────────────────┐
+                    │       QIUI Servers        │
+                    │                           │
+Attacker ──────────►│  /api/v1/  (NO AUTH)  ◄── still running!
+                    │                           │
+Legitimate app ───►│  /api/v2/  (with auth)    │
+                    │                           │
+                    └──────────────────────────┘
+
+    v2 added authentication, but v1 was never shut down.
+    Every vulnerability remained exploitable through v1.
+```
+
+Other problems with the v2 fix:
+
+- **GPS locations still exposed** — the new API still returned exact user coordinates
+- **No rate limiting added** — automated enumeration still possible
+- **Friend code leak** — the 6-digit friend code system leaked user data (usernames, phone numbers, plaintext passwords, GPS coordinates, and the longer `memberCode` used for full API access)
+
+```
+GET /list?memberCode=20200409xxxxxxxx         ← Enumerate all devices
+GET /wear?memberCode=...&deviceCode=...       ← Check permissions
+POST /binding  memberCode=...&deviceCode=...  ← Hijack any device
+```
+
+The `memberCode` format (`20200409xxxxxxxx`) was based on registration date plus a short suffix — **predictable and enumerable**.
+
+### API v3 / App v3.0 (2021+) — The Current State
+
+QIUI eventually developed version 3 of their app and API, and released the "Open Platform" API for third-party developers. This is the version documented in their [public sample code](https://github.com/nicjay/QIUI-API) and what our KeyMaster app uses for BLE command generation.
+
+**What changed in the Open Platform API:**
+
+```
+┌─────────────────────────────────────────────────────────┐
+│              OPEN PLATFORM API (Current)                  │
+├─────────────────────────────────────────────────────────┤
+│                                                          │
+│  Base URL: https://openapi.qiuitoy.com                   │
+│  Auth:     client_credentials → platformApiToken (JWT)   │
+│  Header:   Authorization: {platformApiToken}             │
+│            Environment: TEST                             │
+│                                                          │
+│  Flow:                                                   │
+│    1. getPlatformApiToken (hardcoded ClientId)           │
+│    2. queryDeviceInfo / addDeviceInfo (by MAC)           │
+│    3. getDeviceToken (returns hex command token)         │
+│    4. get*Cmd endpoints (returns BLE hex commands)       │
+│    5. Write hex to BLE device locally                    │
+│    6. decryBluetoothCommand (decrypt device response)    │
+│                                                          │
+└─────────────────────────────────────────────────────────┘
+```
+
+**What's better:**
+
+| Improvement | Details |
+|-------------|---------|
+| JWT tokens | API now uses JWT (HS512) instead of raw memberCodes |
+| User data not in API responses | Device queries no longer return passwords, phone numbers, or GPS |
+| Separate Open Platform | Third-party access uses `openapi.qiuitoy.com` instead of the user-facing API |
+| AES encryption scaffolding | Code contains AES-128-CBC with key/IV (though still disabled in reference code) |
+
+**What's still fundamentally broken:**
+
+| Problem | Why it matters |
+|---------|---------------|
+| **Hardcoded Client ID** | `Client_35115347524B4D1CA9A20BF2F660EF49` is the same for every app instance. It's not a user secret — it's in the open-source sample code. Anyone can get a valid platform token. |
+| **No per-user authentication** | The Open Platform API uses `client_credentials` grant. There are no usernames, passwords, or individual accounts. The platform token works for any device. |
+| **MAC = identity** | Device operations still key on Bluetooth MAC address. Know the MAC → query the device → get command tokens. No ownership check. |
+| **No command signing** | Commands are not signed. The cloud generates hex bytes; anyone with a platform token can request them. |
+| **No replay protection** | No nonces. Request the same unlock command twice, get the same hex bytes. |
+| **No rate limiting** | Nothing prevents automated enumeration of devices by MAC address. |
+| **Shared MQTT** | Same broker, same credentials (`mqtt_usr_7253ae60` / `mqtt_pwd_65abd826`), same topic. Every app instance can monitor every device. |
+| **Encryption still disabled** | `EncryptUtil.encrypt()` and `decrypt()` are no-ops. The AES key (`C8BE...7408`) and IV (`0123456789abcdef`) exist in code but the functions return their input unchanged. |
+| **Environment: TEST** | Every request from the open-source sample code sends `Environment: TEST`. It's unclear if a production environment exists with different security, but this is what third-party developers are given. |
+
+### The Core Design Problem
+
+QIUI's fundamental architecture hasn't changed. The cloud is still the authority on everything — it generates the BLE command bytes, it holds the device tokens, it brokers all communication. The device still has no concept of who is controlling it.
+
+```
+                  QIUI Architecture (Then and Now)
+                  ================================
+
+    "Who can control this device?"
+
+    v1 (2020):   Anyone.
+    v2 (2020):   Anyone with the same shared Client ID.
+    v3 (2021+):  Anyone with the same shared Client ID.
+                 (But now with a JWT wrapper around it.)
+```
+
+The JWT in v3 is a **cosmetic improvement**. It adds a token exchange step, but since the Client ID is hardcoded and shared, and there's no per-user identity, the token is functionally equivalent to the old unauthenticated access — just with an extra HTTP request.
+
+```
+v1:  GET /device?mac=AA:BB:CC:DD:EE:FF                    ← No auth at all
+v3:  POST /getPlatformApiToken {clientId: "Client_..."}    ← Get shared token
+     POST /queryDeviceInfo {mac: "AA:BB:CC:DD:EE:FF"}      ← Same result
+          Authorization: {shared_token}
+```
+
+### QIUI's Official Position
+
+In their [blog post](https://www.qiui.store/blogs/news/case-solved-cellmate-chastity-hacked), QIUI states:
+
+> *"Proper security encryption had been enforced to protect users and prevent any similar incident from happening in the future."*
+
+> *"There had not been a recurrence of such incident ever since October 2020."*
+
+They provided a third-party security test report claiming the v3.0 app is safe. However, they disclosed no technical details about what specifically changed, and the open-source reference code — their public face to third-party developers — still exhibits all the fundamental design flaws.
+
+The absence of repeat incidents likely reflects attackers' disinterest rather than improved security. The [ChastityLock ransomware](https://www.bleepingcomputer.com/news/security/hacker-used-ransomware-to-lock-victims-in-their-iot-chastity-belt/) in late 2020 demonstrated that real exploitation was trivial. The vulnerabilities remain — they're just not being actively exploited at the moment.
+
+Sources:
+- [Pen Test Partners — Smart male chastity lock cock-up](https://www.pentestpartners.com/security-blog/smart-male-chastity-lock-cock-up/)
+- [Internet of Dongs — Locked In An Insecure Cage](https://internetofdon.gs/qiui-chastity-cage/)
+- [TechCrunch — Security flaw left 'smart' chastity sex toy users at risk of permanent lock-in](https://techcrunch.com/2020/10/06/qiui-smart-chastity-sex-toy-security-flaw/)
+- [BleepingComputer — Hacker used ransomware to lock victims in their IoT chastity belt](https://www.bleepingcomputer.com/news/security/hacker-used-ransomware-to-lock-victims-in-their-iot-chastity-belt/)
+- [QIUI — Case Solved: Cellmate Chastity "Hacked"](https://www.qiui.store/blogs/news/case-solved-cellmate-chastity-hacked)
+- [Mozilla Foundation — Qiui Cellmate Privacy & Security Guide](https://www.mozillafoundation.org/en/privacynotincluded/qiui-cellmate/)
