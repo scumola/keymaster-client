@@ -5,38 +5,50 @@ How the KeyMaster self-hosted server authenticates users, pairs devices, and sig
 ## Architecture
 
 ```
-┌──────────────┐                    ┌──────────────┐
-│   Keyholder  │                    │    Wearer    │
-│     App      │                    │     App      │
-└──────┬───────┘                    └──────┬───────┘
-       │                                   │
-       │  HTTPS + JWT + HMAC               │  HTTPS + JWT
-       │                                   │
-       ▼                                   ▼
-┌─────────────────────────────────────────────────┐
-│              KeyMaster Server (PHP)              │
-│                                                  │
-│  ┌───────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ Rate      │  │ JWT Auth │  │ HMAC         │ │
-│  │ Limiter   │  │          │  │ Verification │ │
-│  └───────────┘  └──────────┘  └──────────────┘ │
-│                                                  │
-│  ┌───────────┐  ┌──────────┐  ┌──────────────┐ │
-│  │ Pairing   │  │ Nonce    │  │ Command      │ │
-│  │ Lockout   │  │ Registry │  │ Queue        │ │
-│  └───────────┘  └──────────┘  └──────────────┘ │
-└──────────────────────┬──────────────────────────┘
-                       │
-                       │  MySQL
-                       ▼
-                  ┌──────────┐
-                  │ Database │
-                  └──────────┘
-
+┌──────────────┐                              ┌──────────────┐
+│   Keyholder  │                              │    Wearer    │
+│     App      │                              │     App      │
+└──────┬───────┘                              └──┬────┬──────┘
+       │                                         │    │
+       │  HTTPS + JWT + HMAC                     │    │ HTTPS + JWT
+       │                                         │    │
+       ▼                                         │    ▼
+┌─────────────────────────────────────────────── │ ──────────┐
+│              KeyMaster Server (PHP)             │           │
+│                                                 │           │
+│  ┌───────────┐  ┌──────────┐  ┌──────────────┐│           │
+│  │ Rate      │  │ JWT Auth │  │ HMAC         ││           │
+│  │ Limiter   │  │          │  │ Verification ││           │
+│  └───────────┘  └──────────┘  └──────────────┘│           │
+│                                                 │           │
+│  ┌───────────┐  ┌──────────┐  ┌──────────────┐│           │
+│  │ Pairing   │  │ Nonce    │  │ Command      ││           │
+│  │ Lockout   │  │ Registry │  │ Queue        ││           │
+│  └───────────┘  └──────────┘  └──────────────┘│           │
+└────────────────────┬───────────────────────────┘           │
+                     │                                        │
+                     │ MySQL                                  │
+                     ▼                                        │
+                ┌──────────┐                                  │
+                │ Database │                                  │
+                └──────────┘                                  │
+                                                              │
+                        ┌─────────────────────────────────────┘
+                        │
+                        │  HTTPS (get BLE hex bytes)
+                        │  ⚠ REMAINING QIUI DEPENDENCY
+                        ▼
+                  ┌──────────────────┐
+                  │  QIUI Cloud      │
+                  │  openapi.qiuitoy │
+                  └──────────────────┘
+                        │
+                        │ Returns hex command bytes
+                        ▼
                   Wearer's Phone
-                       │
-                       │ BLE
-                       ▼
+                        │
+                        │ BLE (write hex, read response)
+                        ▼
                   ┌──────────┐
                   │  Device  │
                   │ (KeyPod/ │
@@ -45,7 +57,7 @@ How the KeyMaster self-hosted server authenticates users, pairs devices, and sig
                   └──────────┘
 ```
 
-**Key difference:** The server never talks to the device. It's a command broker between two authenticated humans. The wearer's phone handles all BLE communication locally.
+**Key difference from QIUI's model:** Our server handles all user authentication, pairing, and command authorization. QIUI's cloud is never involved in deciding *who* can control a device — it only provides the raw BLE hex bytes that make the hardware respond. See [Remaining QIUI Dependency](#remaining-qiui-cloud-dependency) for details and the plan to eliminate it.
 
 ## Authentication
 
@@ -536,3 +548,106 @@ Retry-After: 60
 ```
 
 The device itself has no internet connection and no awareness of the server. It only responds to BLE writes from the wearer's phone. This means even if the server is completely compromised, the attacker still cannot lock or unlock any device — they would need physical BLE proximity to each one.
+
+## Remaining QIUI Cloud Dependency
+
+KeyMaster's server is fully independent for authentication, pairing, command authorization, and status tracking. However, **the wearer's app still calls QIUI's cloud** for three things:
+
+### What still goes through QIUI
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                                                                     │
+│  1. DEVICE DISCOVERY (one-time, during setup)                       │
+│     queryDeviceInfo / addDeviceInfo                                 │
+│     App sends MAC address → QIUI returns serial number + type ID    │
+│                                                                     │
+│  2. BLE COMMAND GENERATION (every command)                          │
+│     getKeyPodUnlockCmd / buildCellMatePro4GUnLockCmd / etc.         │
+│     App sends MAC + serial + type → QIUI returns hex bytes          │
+│     App writes hex bytes to the BLE device characteristic           │
+│                                                                     │
+│  3. BLE RESPONSE DECRYPTION (every command response)                │
+│     decryBluetoothCommand                                           │
+│     App sends encrypted BLE notification → QIUI returns plaintext   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### The actual command flow (honest version)
+
+```
+Keyholder ──► KeyMaster Server ──► Wearer App ──► QIUI Cloud ──► Wearer App ──► BLE Device
+              (JWT + HMAC)         (polls cmd)    (get hex)       (writes hex)
+```
+
+Steps 1-5 in the command flow diagram above are accurate. But between steps 3 and 4, there's a hidden detour:
+
+```
+  Wearer App                      QIUI Cloud                    Device
+       │                               │                          │
+       │  Received "unlock" from       │                          │
+       │  our server. Now need the     │                          │
+       │  actual BLE bytes.            │                          │
+       │                               │                          │
+       │  POST /device/keyPod/         │                          │
+       │    getKeyPodUnlockCmd         │                          │
+       │  {mac, serial, typeId}        │                          │
+       │──────────────────────────────►│                          │
+       │                               │                          │
+       │◄──────────────────────────────│                          │
+       │  {data: "AB12CD34EF56..."}    │                          │
+       │                               │                          │
+       │  Convert hex to bytes,                                   │
+       │  write to BLE characteristic                             │
+       │─────────────────────────────────────────────────────────►│
+       │◄─────────────────────────────────────────────────────────│
+       │  BLE notification (encrypted)                            │
+       │                               │                          │
+       │  POST /device/keyPod/         │                          │
+       │    decryBluetoothCommand      │                          │
+       │  {response hex}               │                          │
+       │──────────────────────────────►│                          │
+       │◄──────────────────────────────│                          │
+       │  {decrypted status}           │                          │
+       │                               │                          │
+       ▼                               ▼                          ▼
+```
+
+### What this means
+
+| Scenario | Impact |
+|----------|--------|
+| QIUI cloud goes down | Commands fail — wearer can't get BLE hex bytes |
+| QIUI deprecates API | All commands stop working |
+| QIUI changes API auth | App needs updating |
+| QIUI logs our requests | They see which MACs are being commanded (but not by whom — our server handles identity) |
+
+### What KeyMaster still protects even with this dependency
+
+Even though QIUI generates the BLE bytes, they can't exploit this because:
+- QIUI doesn't know who the keyholder is (our server handles pairing)
+- QIUI can't send unsolicited commands (BLE requires physical proximity from the wearer's phone)
+- QIUI can't forge commands through our server (HMAC signing)
+- The wearer's phone decides when to request and write BLE bytes
+
+The risk is **availability, not security**. QIUI can break our app by shutting down, but they can't use this dependency to attack our users.
+
+### Plan: Phase 5 — Local Command Generation
+
+The goal is to reverse-engineer the BLE command byte format so we can generate them locally, eliminating QIUI entirely. This requires understanding:
+- The structure of the hex command bytes (headers, opcodes, checksums)
+- Whether the "device token" is embedded in commands
+- How BLE responses are encrypted (likely AES-128-CBC with the known key/IV)
+- Per-device-type differences (KeyPod vs CellMate vs Metal)
+
+Once complete, the architecture becomes fully independent:
+
+```
+Keyholder ──► KeyMaster Server ──► Wearer App ──► BLE Device
+              (JWT + HMAC)         (polls cmd,
+                                    generates hex
+                                    locally)
+
+              No QIUI dependency.
+```

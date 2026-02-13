@@ -175,6 +175,14 @@ The server recomputes the HMAC and uses constant-time comparison (`hash_equals`)
 - Commands can't be tampered with in transit
 - Captured commands can't be replayed (nonce uniqueness)
 
+## Known Limitation: QIUI Cloud Dependency
+
+The KeyMaster server is fully independent — authentication, pairing, command signing, and status tracking are all self-hosted. However, the **wearer's app currently still contacts QIUI's cloud** (`openapi.qiuitoy.com`) to obtain the raw BLE hex command bytes that make the hardware respond. QIUI's cloud is not involved in any authorization decisions — it just generates the device-specific byte sequences.
+
+This means if QIUI's cloud goes down, commands can't execute. The security model is not affected (QIUI can't forge commands or identify keyholders), but availability depends on their uptime.
+
+**Work is underway to reverse-engineer the BLE command format and generate bytes locally, eliminating this dependency entirely.** See [PROTOCOL-NEW.md](PROTOCOL-NEW.md#remaining-qiui-cloud-dependency) for the full technical breakdown.
+
 ## Supported Devices
 
 | Device | BLE Service UUID | Type ID |
