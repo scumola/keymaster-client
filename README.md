@@ -1,12 +1,12 @@
 # KeyMaster Client SDK
 
-Kotlin client code for the [KeyMaster](https://badcheese.com/keymaster/) self-hosted device control server — an open alternative to the QIUI cloud API for controlling BLE chastity devices (KeyPod, CellMate, Metal).
+Kotlin client code for the [KeyMaster](http://www.badcheese.com/keymaster/) self-hosted device control server — an open alternative to the QIUI cloud API for controlling BLE chastity devices (KeyPod, CellMate, Metal).
 
 ## What is this?
 
 KeyMaster lets you pair a **wearer** (who has the physical BLE device) with a **keyholder** (who can remotely lock/unlock it) through a self-hosted server instead of relying on QIUI's cloud. This repo contains the Kotlin client-side code you need to integrate with the server.
 
-**Download the full app:** [keymaster.apk](https://badcheese.com/keymaster.apk)
+**Download the full app:** [keymaster.apk](http://www.badcheese.com/keymaster.apk)
 
 ## Quick Start
 
@@ -34,7 +34,7 @@ val client = OkHttpClient.Builder()
     .build()
 
 val api = Retrofit.Builder()
-    .baseUrl("https://badcheese.com/keymaster/api/")
+    .baseUrl("http://www.badcheese.com/keymaster/api/")
     .client(client)
     .addConverterFactory(GsonConverterFactory.create())
     .build()

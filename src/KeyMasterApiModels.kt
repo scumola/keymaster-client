@@ -5,7 +5,7 @@
  * self-hosted server API. They are designed for use with Retrofit + Gson, but can
  * be adapted to any HTTP client and JSON library.
  *
- * Server API base URL: https://badcheese.com/keymaster/api/
+ * Server API base URL: http://www.badcheese.com/keymaster/api/
  *
  * See README.md for full API documentation.
  */

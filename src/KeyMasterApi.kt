@@ -15,7 +15,7 @@
  *     .build()
  *
  * val api = Retrofit.Builder()
- *     .baseUrl("https://badcheese.com/keymaster/api/")
+ *     .baseUrl("http://www.badcheese.com/keymaster/api/")
  *     .client(client)
  *     .addConverterFactory(GsonConverterFactory.create())
  *     .build()
